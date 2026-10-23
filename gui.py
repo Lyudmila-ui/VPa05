@@ -11,11 +11,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from collections.abc import Callable
+
 from database import (
     STATUS_CANCELLED,
     STATUS_DONE,
     STATUS_OVERDUE,
     STATUS_PENDING,
+    STATUSES,
     Reminder,
     ReminderDatabase,
     default_db_path,
@@ -84,6 +87,7 @@ STATUS_TAG = {
 }
 
 POLL_MS = 1000
+SNOOZE_AFTER = timedelta(minutes=10)
 TITLE_LIMIT = 120
 DESCRIPTION_LIMIT = 2000
 HWND_TOPMOST = -1
@@ -208,8 +212,17 @@ def show_windows_toast(title: str, message: str) -> None:
 class ReminderPopup(tk.Toplevel):
     """Always-on-top reminder. Stays visible when the main window is minimized."""
 
-    def __init__(self, master: tk.Misc, reminders: list[Reminder], stack_index: int) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        reminders: list[Reminder],
+        stack_index: int,
+        on_snooze: Callable[[int], datetime],
+        on_status: Callable[[int, str], bool],
+    ) -> None:
         super().__init__(master)
+        self._on_snooze = on_snooze
+        self._on_status = on_status
         self.configure(bg=COLOR_SHEET)
         self.resizable(False, False)
         self.attributes("-topmost", True)
@@ -219,70 +232,21 @@ class ReminderPopup(tk.Toplevel):
         padding = tk.Frame(self, bg=COLOR_SHEET)
         padding.pack(fill="both", expand=True, padx=22, pady=18)
 
-        kicker = tk.Label(
+        tk.Label(
             padding,
             text="Напоминание" if single else f"Напоминания: {len(reminders)}",
             bg=COLOR_SHEET,
-            fg=COLOR_LATE,
+            fg=COLOR_MUTED,
             font=("Segoe UI", 10),
             anchor="w",
-        )
-        kicker.pack(fill="x")
+        ).pack(fill="x")
 
-        if single:
-            reminder = reminders[0]
-            time_font = _choose_font(self, "Bahnschrift", 36)
-            tk.Label(
-                padding,
-                text=reminder.trigger_at.strftime("%H:%M"),
-                bg=COLOR_SHEET,
-                fg=COLOR_INK,
-                font=time_font,
-                anchor="w",
-            ).pack(fill="x", pady=(6, 0))
-            tk.Label(
-                padding,
-                text=reminder.title,
-                bg=COLOR_SHEET,
-                fg=COLOR_INK,
-                font=("Segoe UI", 14),
-                anchor="w",
-                justify="left",
-                wraplength=340,
-            ).pack(fill="x", pady=(2, 8))
-            if reminder.description:
-                tk.Label(
-                    padding,
-                    text=reminder.description,
-                    bg=COLOR_SHEET,
-                    fg=COLOR_MUTED,
-                    font=("Segoe UI", 11),
-                    anchor="w",
-                    justify="left",
-                    wraplength=340,
-                ).pack(fill="x")
-        else:
-            lines = [
-                f"{item.trigger_at.strftime('%H:%M')}  {item.title}"
-                + (f"\n{item.description}" if item.description else "")
-                for item in reminders
-            ]
-            text = tk.Text(
-                padding,
-                width=42,
-                height=min(12, 2 + len(reminders) * 2),
-                bg=COLOR_SHEET,
-                fg=COLOR_INK,
-                font=("Segoe UI", 11),
-                relief="flat",
-                wrap="word",
-                highlightthickness=0,
-            )
-            text.insert("1.0", "\n\n".join(lines))
-            text.configure(state="disabled")
-            text.pack(fill="both", expand=True, pady=(10, 0))
+        for index, reminder in enumerate(reminders):
+            if index:
+                tk.Frame(padding, bg=COLOR_LINE, height=1).pack(fill="x", pady=(14, 0))
+            self._build_reminder(padding, reminder, featured=single)
 
-        close = tk.Button(
+        tk.Button(
             padding,
             text="Закрыть",
             command=self.destroy,
@@ -296,18 +260,162 @@ class ReminderPopup(tk.Toplevel):
             pady=8,
             font=("Segoe UI", 10),
             cursor="hand2",
-        )
-        close.pack(anchor="e", pady=(16, 0))
+        ).pack(anchor="e", pady=(16, 0))
 
         self.update_idletasks()
-        width = 400
-        height = max(self.winfo_reqheight(), 220)
+        width = max(480, self.winfo_reqwidth())
+        height = max(240, self.winfo_reqheight())
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         x = max(0, screen_w - width - 28)
         y = max(0, screen_h - height - 80 - stack_index * 36)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.after(50, self._raise)
+
+    def _build_reminder(self, parent: tk.Widget, reminder: Reminder, featured: bool) -> None:
+        if featured:
+            time_font = _choose_font(self, "Bahnschrift", 36)
+            tk.Label(
+                parent,
+                text=reminder.trigger_at.strftime("%H:%M"),
+                bg=COLOR_SHEET,
+                fg=COLOR_INK,
+                font=time_font,
+                anchor="w",
+            ).pack(fill="x", pady=(6, 0))
+            tk.Label(
+                parent,
+                text=reminder.title,
+                bg=COLOR_SHEET,
+                fg=COLOR_INK,
+                font=("Segoe UI", 14),
+                anchor="w",
+                justify="left",
+                wraplength=430,
+            ).pack(fill="x", pady=(2, 8))
+            if reminder.description:
+                tk.Label(
+                    parent,
+                    text=reminder.description,
+                    bg=COLOR_SHEET,
+                    fg=COLOR_MUTED,
+                    font=("Segoe UI", 11),
+                    anchor="w",
+                    justify="left",
+                    wraplength=430,
+                ).pack(fill="x")
+        else:
+            tk.Label(
+                parent,
+                text=f"{reminder.trigger_at.strftime('%H:%M')}  {reminder.title}",
+                bg=COLOR_SHEET,
+                fg=COLOR_INK,
+                font=("Segoe UI", 12),
+                anchor="w",
+                justify="left",
+                wraplength=430,
+            ).pack(fill="x", pady=(12, 0))
+            if reminder.description:
+                tk.Label(
+                    parent,
+                    text=reminder.description,
+                    bg=COLOR_SHEET,
+                    fg=COLOR_MUTED,
+                    font=("Segoe UI", 11),
+                    anchor="w",
+                    justify="left",
+                    wraplength=430,
+                ).pack(fill="x", pady=(4, 0))
+
+        note = tk.Label(
+            parent,
+            text=f"Статус: {STATUS_DONE}.",
+            bg=COLOR_SHEET,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+            justify="left",
+            wraplength=430,
+        )
+        actions = tk.Frame(parent, bg=COLOR_SHEET)
+        snooze = tk.Button(
+            actions,
+            text="Отложить на 10 мин",
+            command=lambda: self._snooze(reminder, snooze, note),
+            bg=COLOR_SHEET,
+            fg=COLOR_INK,
+            activebackground=COLOR_SELECT,
+            activeforeground=COLOR_INK,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=8,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=COLOR_LINE,
+            highlightcolor=COLOR_INK,
+        )
+        snooze.pack(side="left")
+        status_button = tk.Menubutton(
+            actions,
+            text="Выбрать статус",
+            relief="flat",
+            bd=0,
+            bg=COLOR_SHEET,
+            fg=COLOR_INK,
+            activebackground=COLOR_SELECT,
+            activeforeground=COLOR_INK,
+            font=("Segoe UI", 10),
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=COLOR_LINE,
+            highlightcolor=COLOR_INK,
+            direction="above",
+        )
+        menu = tk.Menu(status_button, tearoff=0, font=("Segoe UI", 10))
+        for status in STATUSES:
+            menu.add_command(
+                label=status,
+                command=lambda chosen=status, item_id=reminder.id, snooze_button=snooze, label=note: (
+                    self._choose_status(item_id, chosen, label, snooze_button)
+                ),
+            )
+        status_button["menu"] = menu
+        status_button.pack(side="left", padx=(8, 0))
+        actions.pack(fill="x", pady=(14, 0))
+        note.pack(fill="x", pady=(8, 0))
+
+    def _snooze(self, reminder: Reminder, button: tk.Button, note: tk.Label) -> None:
+        try:
+            until = self._on_snooze(reminder.id)
+        except (KeyError, sqlite3.Error):
+            note.configure(text="Не удалось отложить.")
+            return
+        button.configure(state="disabled")
+        note.configure(text=f"Отложено до {until.strftime('%H:%M')}. Статус: {STATUS_PENDING}.")
+
+    def _choose_status(
+        self,
+        reminder_id: int,
+        status: str,
+        note: tk.Label,
+        snooze_button: tk.Button,
+    ) -> None:
+        try:
+            time_already_passed = self._on_status(reminder_id, status)
+        except (KeyError, sqlite3.Error, ValueError):
+            note.configure(text="Не удалось сменить статус.")
+            return
+        if status == STATUS_PENDING and time_already_passed:
+            note.configure(
+                text=f"Статус: {status}. Время уже прошло, сигнал не повторится — отложите его."
+            )
+            return
+        snooze_button.configure(state="normal")
+        note.configure(text=f"Статус: {status}.")
 
     def _raise(self) -> None:
         if not self.winfo_exists():
@@ -326,12 +434,17 @@ class Notifier:
         self.root = root
         self._popups: list[ReminderPopup] = []
 
-    def notify(self, reminders: list[Reminder]) -> None:
+    def notify(
+        self,
+        reminders: list[Reminder],
+        on_snooze: Callable[[int], datetime],
+        on_status: Callable[[int, str], bool],
+    ) -> None:
         if not reminders:
             return
         self._sound()
         self._popups = [popup for popup in self._popups if popup.winfo_exists()]
-        popup = ReminderPopup(self.root, reminders, len(self._popups))
+        popup = ReminderPopup(self.root, reminders, len(self._popups), on_snooze, on_status)
         self._popups.append(popup)
         threading.Thread(target=self._toast_all, args=(tuple(reminders),), daemon=True).start()
 
@@ -372,8 +485,8 @@ class ReminderApp(tk.Tk):
 
         self.title("Напоминания")
         self.configure(bg=COLOR_BG)
-        self.minsize(860, 560)
-        self._center(980, 660)
+        self.minsize(860, 640)
+        self._center(980, 720)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_styles()
@@ -411,7 +524,6 @@ class ReminderApp(tk.Tk):
         style.map(
             "Reminders.Treeview",
             background=[("selected", COLOR_SELECT)],
-            foreground=[("selected", COLOR_INK)],
         )
         style.layout("Reminders.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure(
@@ -567,6 +679,40 @@ class ReminderApp(tk.Tk):
 
         form = tk.Frame(body, bg=COLOR_BG)
         form.grid(row=1, column=1, sticky="nsew", padx=(20, 24), pady=(0, 8))
+
+        add = tk.Button(
+            form,
+            text="Добавить",
+            command=self._add,
+            bg=COLOR_INK,
+            fg=COLOR_SHEET,
+            activebackground=COLOR_BUTTON_ACTIVE,
+            activeforeground=COLOR_SHEET,
+            relief="flat",
+            bd=0,
+            padx=16,
+            pady=10,
+            font=("Segoe UI", 11),
+            cursor="hand2",
+        )
+        add.pack(side="bottom", fill="x")
+
+        self.form_error = tk.Label(
+            form,
+            text="",
+            bg=COLOR_BG,
+            fg=COLOR_LATE,
+            font=("Segoe UI", 10),
+            anchor="w",
+            justify="left",
+            wraplength=280,
+            height=2,
+        )
+        self.form_error.pack(side="bottom", fill="x", pady=(8, 10))
+
+        when = tk.Frame(form, bg=COLOR_BG)
+        when.pack(side="bottom", fill="x")
+
         tk.Label(
             form,
             text="Новое напоминание",
@@ -583,7 +729,7 @@ class ReminderApp(tk.Tk):
         self.description_box = tk.Text(
             form,
             width=28,
-            height=4,
+            height=3,
             bg=COLOR_SHEET,
             fg=COLOR_INK,
             insertbackground=COLOR_INK,
@@ -596,10 +742,7 @@ class ReminderApp(tk.Tk):
             padx=8,
             pady=6,
         )
-        self.description_box.pack(fill="x")
-
-        when = tk.Frame(form, bg=COLOR_BG)
-        when.pack(fill="x", pady=(12, 0))
+        self.description_box.pack(fill="both", expand=True, pady=(0, 12))
 
         tk.Label(when, text="Дата", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 10), anchor="w").pack(fill="x")
         date_row = tk.Frame(when, bg=COLOR_BG)
@@ -637,35 +780,6 @@ class ReminderApp(tk.Tk):
         tk.Label(time_row, text=":", bg=COLOR_BG, fg=COLOR_INK, font=("Segoe UI", 14)).pack(side="left", padx=4)
         self.minute_spin = self._spinbox(time_row, 0, 59, 3)
         self.minute_spin.pack(side="left")
-
-        self.form_error = tk.Label(
-            form,
-            text="",
-            bg=COLOR_BG,
-            fg=COLOR_LATE,
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-            wraplength=280,
-        )
-        self.form_error.pack(fill="x", pady=(10, 0))
-
-        add = tk.Button(
-            form,
-            text="Добавить",
-            command=self._add,
-            bg=COLOR_INK,
-            fg=COLOR_SHEET,
-            activebackground=COLOR_BUTTON_ACTIVE,
-            activeforeground=COLOR_SHEET,
-            relief="flat",
-            bd=0,
-            padx=16,
-            pady=10,
-            font=("Segoe UI", 11),
-            cursor="hand2",
-        )
-        add.pack(fill="x", pady=(12, 0))
         self._set_default_when(datetime.now() + timedelta(hours=1))
 
         footer = tk.Frame(self, bg=COLOR_BG)
@@ -959,7 +1073,7 @@ class ReminderApp(tk.Tk):
                 return
             due = self.db.claim_due(datetime.now())
             if due:
-                self.notifier.notify(due)
+                self.notifier.notify(due, self._snooze_from_popup, self._status_from_popup)
                 self.refresh()
                 self._set_error("")
         except tk.TclError:
@@ -971,7 +1085,36 @@ class ReminderApp(tk.Tk):
         except tk.TclError:
             return
 
+    def _snooze_from_popup(self, reminder_id: int) -> datetime:
+        until = (datetime.now() + SNOOZE_AFTER).replace(microsecond=0)
+        self.db.snooze(reminder_id, until)
+        self.refresh()
+        self._set_error("")
+        return until
+
+    def _status_from_popup(self, reminder_id: int, status: str) -> bool:
+        self.db.set_status(reminder_id, status)
+        self.refresh()
+        self._set_error("")
+        saved = self.db.get(reminder_id)
+        return saved is not None and saved.status == STATUS_PENDING and saved.notified
+
     def _on_close(self) -> None:
+        for popup in list(self.notifier._popups):
+            if popup.winfo_exists():
+                popup.attributes("-topmost", False)
+        confirmed = messagebox.askyesno(
+            "Закрыть программу",
+            "Закрыть программу? Напоминания не появятся, пока она снова не будет запущена.",
+            parent=self,
+            default="no",
+        )
+        if not confirmed:
+            for popup in list(self.notifier._popups):
+                if popup.winfo_exists():
+                    popup.attributes("-topmost", True)
+                    popup.lift()
+            return
         self.notifier.close()
         self.destroy()
 

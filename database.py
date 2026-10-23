@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,8 +19,15 @@ STATUSES = (STATUS_PENDING, STATUS_DONE, STATUS_OVERDUE, STATUS_CANCELLED)
 _TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
+def application_folder() -> Path:
+    """Folder where reminders.db lives: beside the exe, or beside this file."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def default_db_path() -> Path:
-    return Path(__file__).resolve().parent / "reminders.db"
+    return application_folder() / "reminders.db"
 
 
 @dataclass(frozen=True)
@@ -137,15 +145,39 @@ class ReminderDatabase:
     def set_status(self, reminder_id: int, status: str) -> None:
         if status not in STATUSES:
             raise ValueError(status)
-        notified = 0 if status == STATUS_PENDING else 1
+        now = _format_time(datetime.now())
+        with self._connection() as connection:
+            if status == STATUS_PENDING:
+                cursor = connection.execute(
+                    """
+                    UPDATE reminders
+                    SET status = ?,
+                        notified = CASE WHEN trigger_at > ? THEN 0 ELSE 1 END
+                    WHERE id = ?
+                    """,
+                    (status, now, reminder_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE reminders
+                    SET status = ?, notified = 1
+                    WHERE id = ?
+                    """,
+                    (status, reminder_id),
+                )
+            if cursor.rowcount == 0:
+                raise KeyError(reminder_id)
+
+    def snooze(self, reminder_id: int, until: datetime) -> None:
         with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE reminders
-                SET status = ?, notified = ?
+                SET trigger_at = ?, status = ?, notified = 0
                 WHERE id = ?
                 """,
-                (status, notified, reminder_id),
+                (_format_time(until), STATUS_PENDING, reminder_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(reminder_id)
@@ -157,7 +189,7 @@ class ReminderDatabase:
                 raise KeyError(reminder_id)
 
     def claim_due(self, now: datetime) -> list[Reminder]:
-        """Mark waiting reminders whose time has come as overdue, once.
+        """Show each waiting reminder once, then mark it done.
 
         Returns the reminders that should be shown now. A second call does not
         return them again.
@@ -179,9 +211,22 @@ class ReminderDatabase:
                     SET status = ?, notified = 1
                     WHERE id = ?
                     """,
-                    [(STATUS_OVERDUE, int(row["id"])) for row in rows],
+                    [(STATUS_DONE, int(row["id"])) for row in rows],
                 )
-        return [_reminder_from_row(row) for row in rows]
+        shown: list[Reminder] = []
+        for row in rows:
+            item = _reminder_from_row(row)
+            shown.append(
+                Reminder(
+                    id=item.id,
+                    title=item.title,
+                    description=item.description,
+                    trigger_at=item.trigger_at,
+                    status=STATUS_DONE,
+                    notified=True,
+                )
+            )
+        return shown
 
 
 def _format_time(value: datetime) -> str:
